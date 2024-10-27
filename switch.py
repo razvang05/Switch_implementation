@@ -102,6 +102,7 @@ def main():
         # TODO: Implement forwarding with learning
         # TODO: Implement VLAN support
         # TODO: Implement STP support
+        # primul task
 
         # data is of type bytes.
         # send_to_link(i, length, data)
