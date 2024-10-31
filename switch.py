@@ -6,6 +6,9 @@ import threading
 import time
 from wrapper import recv_from_any_link, send_to_link, get_switch_mac, get_interface_name
 mac_table = {}
+vlan_config = {}
+port_type = {}
+
 
 def parse_ethernet_header(data):
     # Unpack the header fields from the byte array
@@ -29,6 +32,8 @@ def create_vlan_tag(vlan_id):
     # 0x8100 for the Ethertype for 802.1Q
     # vlan_id & 0x0FFF ensures that only the last 12 bits are used
     return struct.pack('!H', 0x8200) + struct.pack('!H', vlan_id & 0x0FFF)
+def remove_vlan_tag(frame):
+    return frame[0:12] + frame[16:]
 
 def send_bdpu_every_sec():
     while True:
@@ -36,12 +41,67 @@ def send_bdpu_every_sec():
         time.sleep(1)
     
 def is_broadcast(dest_mac):
-    return dest_mac == b'\xff\xff\xff\xff\xff\xff'
+    return dest_mac == 'ff:ff:ff:ff:ff:ff'
+
+def create_tagged_frame(vlan,data,target_port,length):
+    tagged_frame = data[0:12] + create_vlan_tag(vlan) + data[12:]
+    send_to_link(target_port,length + 4,tagged_frame)
+
+def create_untagged_frame(data,length,target_port):
+    untagged_frame = data[0:12] + data[16:]
+    send_to_link(target_port, length - 4, untagged_frame)
+
+def forward_frame(target_port,interface,length,data,vlan_id):
+    if vlan_id == -1: 
+        if port_type[get_interface_name(target_port)] == 'trunk':
+            create_tagged_frame(vlan_config[get_interface_name(interface)],data,target_port,length)
+        
+        else:
+            vlan_interface_to_send = vlan_config[get_interface_name(target_port)]
+            vlan_source = vlan_config[get_interface_name(interface)]
+            if vlan_interface_to_send == vlan_source:
+                send_to_link(target_port,length,data)
+
+    else: 
+        if port_type[get_interface_name(target_port)] == 'trunk':
+            send_to_link(target_port, length, data)
+        else:
+            vlan_interface_to_send = vlan_config[get_interface_name(target_port)]
+            if vlan_interface_to_send == vlan_id:
+                create_untagged_frame(data,length,target_port)
+
+
+def load_vlan_config(switch_id):
+    global vlan_config, port_type
+    try:
+        file_path = 'configs/switch' + switch_id + '.cfg'
+        with open(file_path,'r') as f:
+            lines = f.readlines()
+            priority = int(lines[0].strip())
+
+            for line in lines[1:]:
+                parts = line.strip().split()
+                interface = parts[0]
+
+                if parts[1]=='T':
+                    port_type[interface] = 'trunk'
+                    vlan_config[interface] = -2
+                else:
+                    vlan_id = int(parts[1])
+                    port_type[interface] = 'access'
+                    vlan_config[interface] = vlan_id
+        
+    except IOError:
+        print(f"Can't read the file {file_path}")
+    except ValueError:
+        print(f"Invalid format: {file_path}")
 
 def main():
     # init returns the max interface number. Our interfaces
     # are 0, 1, 2, ..., init_ret value + 1
     switch_id = sys.argv[1]
+    global mac_table
+    load_vlan_config(switch_id)
 
     num_interfaces = wrapper.init(sys.argv[2:])
     interfaces = range(0, num_interfaces)
@@ -78,34 +138,20 @@ def main():
         print(f'EtherType: {ethertype}')
 
         print("Received frame of size {} on interface {}".format(length, interface), flush=True)
-        mac_table[src_mac] = interface
+        mac_table[src_mac] = (interface,vlan_id)
 
-        if is_broadcast(dest_mac):
-            print("Broadcast frame received, flooding all ports")
-            for port in interfaces:
-                if port != interface:
-                    send_to_link(port, length, data)
-                    print(f"Broadcast frame sent on interface {port}")
+
+
+        # unicast
+        if dest_mac in mac_table:
+            target_port,target_vlan = mac_table[dest_mac]
+            forward_frame(target_port,interface,length,data,vlan_id)
         else:
-            if dest_mac in mac_table:
-                target = mac_table[dest_mac]
-                if target != interface:
-                    send_to_link(target, length, data)
-                    print(f"Unicast frame sent to interface {target}")
-            else:
-                for port in interfaces:
-                    if port != interface:
-                        send_to_link(port, length, data)
-                        print(f"Unknown destination frame flooded on interface {port}")
-                
+            for i in interfaces:
+                if i != interface:
+                    forward_frame(i,interface,length,data,vlan_id)
+                    
 
-        # TODO: Implement forwarding with learning
-        # TODO: Implement VLAN support
-        # TODO: Implement STP support
-        # primul task
-
-        # data is of type bytes.
-        # send_to_link(i, length, data)
 
 if __name__ == "__main__":
     main()
