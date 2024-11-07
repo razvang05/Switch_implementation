@@ -8,7 +8,16 @@ from wrapper import recv_from_any_link, send_to_link, get_switch_mac, get_interf
 mac_table = {}
 vlan_config = {}
 port_type = {}
-
+port_states = {}
+own_bridge_id=0
+root_bridge_id=0
+root_path_cost=0
+root_port=0
+priority=0
+BPDU_MULTICAST_MAC = b'\x01\x80\xc2\x00\x00\x00'
+LLC_LENGTH = struct.pack('!H', 52) # H means packed as unsigned short (2 bytes)
+LLC_HEADER = b'\x42\x42\x03' # DSAP | SSAP | Control
+BPDU_HEADER = b'\x00\x00\x00\x00' # Protocol Identifier | Protocol Version Identifier | BPDU Type 
 
 def parse_ethernet_header(data):
     # Unpack the header fields from the byte array
@@ -32,12 +41,31 @@ def create_vlan_tag(vlan_id):
     # 0x8100 for the Ethertype for 802.1Q
     # vlan_id & 0x0FFF ensures that only the last 12 bits are used
     return struct.pack('!H', 0x8200) + struct.pack('!H', vlan_id & 0x0FFF)
-def remove_vlan_tag(frame):
-    return frame[0:12] + frame[16:]
+
+def create_bpdu(root_bridge_id,sender_path_cost,sender_bridge_id,port):
+    dest_mac = BPDU_MULTICAST_MAC
+    src_mac = get_switch_mac()
+    bpdu_config = {
+        'flags': b'\x00',
+        'root_bridge_id': struct.pack('!Q', root_bridge_id),
+        'root_path_cost': struct.pack('!L', sender_path_cost),
+        'bridge_id': struct.pack('!Q', sender_bridge_id),
+        'port_id': struct.pack('!H', port),
+    }
+    bpdu = dest_mac + src_mac + LLC_LENGTH + LLC_HEADER + BPDU_HEADER + b''.join(bpdu_config.values())
+    return bpdu
 
 def send_bdpu_every_sec():
     while True:
-        # TODO Send BDPU every second if necessary
+        global own_bridge_id, root_bridge_id
+        if root_bridge_id == own_bridge_id:
+            for port in port_states:
+                if port_type[get_interface_name(port)] == 'trunk':
+                    root_bridge_id = own_bridge_id
+                    sender_bridge_id = own_bridge_id
+                    sender_path_cost=0
+                    bpdu = create_bpdu(root_bridge_id,sender_path_cost,sender_bridge_id,port)
+                    send_to_link(port, len(bpdu),bpdu)
         time.sleep(1)
     
 def is_broadcast(dest_mac):
@@ -72,9 +100,10 @@ def forward_frame(target_port,interface,length,data,vlan_id):
 
 
 def load_vlan_config(switch_id):
-    global vlan_config, port_type
+    global vlan_config, port_type,priority
     try:
         file_path = 'configs/switch' + switch_id + '.cfg'
+
         with open(file_path,'r') as f:
             lines = f.readlines()
             priority = int(lines[0].strip())
@@ -95,6 +124,67 @@ def load_vlan_config(switch_id):
         print(f"Can't read the file {file_path}")
     except ValueError:
         print(f"Invalid format: {file_path}")
+
+def initialize_stp(interfaces):
+    global port_states,root_path_cost,own_bridge_id,root_bridge_id,priority
+    for i in interfaces:
+        if port_type[get_interface_name(i)] =='trunk':
+            port_states[i] = 'BLOCKING'
+        else:
+            port_states[i] = 'DESIGNATED_PORT'
+
+    own_bridge_id=priority
+    root_bridge_id=own_bridge_id
+    root_path_cost=0
+
+    if own_bridge_id == root_bridge_id:
+        for port in port_states:
+            port_states[port] = 'DESIGNATED_PORT'
+
+def receive_bpdu(interface, data,interfaces):
+    global root_bridge_id, root_path_cost, root_port, own_bridge_id, port_states
+   
+    root_bridge_id_bpdu = int.from_bytes(data[22:30],'big')
+    root_path_cost_bpdu = int.from_bytes(data[30:34],'big')
+    bridge_id_bpdu = int.from_bytes(data[34:42],'big')
+    port_id_bpdu = int.from_bytes(data[42:44],'big')
+    
+
+    if root_bridge_id_bpdu < root_bridge_id:
+        prev_root_bridge_id = root_bridge_id  # save the previous root bridge id
+        root_bridge_id = root_bridge_id_bpdu
+        root_path_cost = root_path_cost_bpdu + 10
+        root_port = port_id_bpdu
+
+        if own_bridge_id == prev_root_bridge_id:
+            for port in port_states:
+                if port_type[get_interface_name(port)] == 'trunk' and port != root_port:
+                    port_states[port] = 'BLOCKING'
+
+        if port_states[root_port] == 'BLOCKING':
+            port_states[root_port] = 'LISTENING'
+        
+    
+        
+        for port in interfaces:
+            if port != interface and port_type[get_interface_name(port)] == 'trunk':
+                bpdu = create_bpdu(root_bridge_id, root_path_cost, own_bridge_id, port)
+                send_to_link(port,len(bpdu),bpdu)
+                
+    elif root_bridge_id_bpdu == root_bridge_id:
+        if interface == root_port and root_path_cost_bpdu + 10 < root_path_cost:
+            root_path_cost = root_path_cost_bpdu + 10
+        elif interface != root_port:
+            if root_path_cost_bpdu > root_path_cost and port_states[interface] == 'BLOCKING':
+                port_states[interface] = 'LISTENING'
+
+    elif bridge_id_bpdu == own_bridge_id:
+        port_states[interface] = 'BLOCKING'
+
+    if own_bridge_id == root_bridge_id:
+        for port in interfaces:
+            if port_type[get_interface_name(port)] == 'trunk':
+                port_states[port] = 'DESIGNATED_PORT'
 
 def main():
     # init returns the max interface number. Our interfaces
@@ -117,6 +207,9 @@ def main():
     for i in interfaces:
         print(get_interface_name(i))
 
+
+    initialize_stp(interfaces)
+
     while True:
         # Note that data is of type bytes([...]).
         # b1 = bytes([72, 101, 108, 108, 111])  # "Hello"
@@ -125,6 +218,7 @@ def main():
         interface, data, length = recv_from_any_link()
 
         dest_mac, src_mac, ethertype, vlan_id = parse_ethernet_header(data)
+        dest_mac_init = dest_mac
 
         # Print the MAC src and MAC dst in human readable format
         dest_mac = ':'.join(f'{b:02x}' for b in dest_mac)
@@ -138,18 +232,25 @@ def main():
         print(f'EtherType: {ethertype}')
 
         print("Received frame of size {} on interface {}".format(length, interface), flush=True)
-        mac_table[src_mac] = (interface,vlan_id)
 
-
-
-        # unicast
-        if dest_mac in mac_table:
-            target_port,target_vlan = mac_table[dest_mac]
-            forward_frame(target_port,interface,length,data,vlan_id)
+        if dest_mac_init == BPDU_MULTICAST_MAC:
+            receive_bpdu(interface,data,interfaces)
         else:
-            for i in interfaces:
-                if i != interface:
-                    forward_frame(i,interface,length,data,vlan_id)
+            mac_table[src_mac] = (interface,vlan_id)
+            # broadcast
+            if(is_broadcast(dest_mac)):
+                for i in interfaces:
+                    if i != interface and port_states[i]!='BLOCKING':
+                        forward_frame(i,interface,length,data,vlan_id)
+            else:
+                if dest_mac in mac_table:
+                    target_port,target_vlan = mac_table[dest_mac]
+                    if port_states[target_port] != 'BLOCKING':
+                        forward_frame(target_port,interface,length,data,vlan_id)
+                else:
+                    for i in interfaces:
+                        if i != interface and port_states[i]!='BLOCKING':
+                            forward_frame(i,interface,length,data,vlan_id)
                     
 
 
