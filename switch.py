@@ -45,27 +45,31 @@ def create_vlan_tag(vlan_id):
 def create_bpdu(root_bridge_id,sender_path_cost,sender_bridge_id,port):
     dest_mac = BPDU_MULTICAST_MAC
     src_mac = get_switch_mac()
-    bpdu_config = {
-        'flags': b'\x00',
-        'root_bridge_id': struct.pack('!Q', root_bridge_id),
-        'root_path_cost': struct.pack('!L', sender_path_cost),
-        'bridge_id': struct.pack('!Q', sender_bridge_id),
-        'port_id': struct.pack('!H', port),
-    }
-    bpdu = dest_mac + src_mac + LLC_LENGTH + LLC_HEADER + BPDU_HEADER + b''.join(bpdu_config.values())
-    return bpdu
+    bpdu = (
+        dest_mac + src_mac + LLC_LENGTH + LLC_HEADER + BPDU_HEADER +
+        b'\x00' +  # flags
+        struct.pack('!Q', root_bridge_id) +  # root_bridge_id, 8 bytes
+        struct.pack('!L', sender_path_cost) +  # root_path_cost, 4 bytes
+        struct.pack('!Q', sender_bridge_id) +  # bridge_id, 8 bytes
+        struct.pack('!H', port)  # port_id, 2 bytes
+    )
+    send_to_link(port, len(bpdu),bpdu)
 
 def send_bdpu_every_sec():
     while True:
+
         global own_bridge_id, root_bridge_id
+
         if root_bridge_id == own_bridge_id:
             for port in port_states:
+
                 if port_type[get_interface_name(port)] == 'trunk':
                     root_bridge_id = own_bridge_id
                     sender_bridge_id = own_bridge_id
                     sender_path_cost=0
-                    bpdu = create_bpdu(root_bridge_id,sender_path_cost,sender_bridge_id,port)
-                    send_to_link(port, len(bpdu),bpdu)
+
+                    create_bpdu(root_bridge_id,sender_path_cost,sender_bridge_id,port)
+                
         time.sleep(1)
     
 def is_broadcast(dest_mac):
@@ -85,18 +89,19 @@ def forward_frame(target_port,interface,length,data,vlan_id):
             create_tagged_frame(vlan_config[get_interface_name(interface)],data,target_port,length)
         
         else:
-            vlan_interface_to_send = vlan_config[get_interface_name(target_port)]
+            vlan_dest = vlan_config[get_interface_name(target_port)]
             vlan_source = vlan_config[get_interface_name(interface)]
-            if vlan_interface_to_send == vlan_source:
+            if vlan_dest == vlan_source:
                 send_to_link(target_port,length,data)
 
     else: 
-        if port_type[get_interface_name(target_port)] == 'trunk':
-            send_to_link(target_port, length, data)
-        else:
-            vlan_interface_to_send = vlan_config[get_interface_name(target_port)]
-            if vlan_interface_to_send == vlan_id:
+        if port_type[get_interface_name(target_port)] == 'access':
+            vlan_dest = vlan_config[get_interface_name(target_port)]
+            if vlan_dest == vlan_id:
                 create_untagged_frame(data,length,target_port)
+        else:
+            send_to_link(target_port, length, data)
+    
 
 
 def load_vlan_config(switch_id):
@@ -127,6 +132,7 @@ def load_vlan_config(switch_id):
 
 def initialize_stp(interfaces):
     global port_states,root_path_cost,own_bridge_id,root_bridge_id,priority
+    
     for i in interfaces:
         if port_type[get_interface_name(i)] =='trunk':
             port_states[i] = 'BLOCKING'
@@ -144,10 +150,10 @@ def initialize_stp(interfaces):
 def receive_bpdu(interface, data,interfaces):
     global root_bridge_id, root_path_cost, root_port, own_bridge_id, port_states
    
-    root_bridge_id_bpdu = int.from_bytes(data[22:30],'big')
-    root_path_cost_bpdu = int.from_bytes(data[30:34],'big')
-    bridge_id_bpdu = int.from_bytes(data[34:42],'big')
-    port_id_bpdu = int.from_bytes(data[42:44],'big')
+    root_bridge_id_bpdu = int.from_bytes(data[22:30],byteorder='big')
+    root_path_cost_bpdu = int.from_bytes(data[30:34],byteorder='big')
+    bridge_id_bpdu = int.from_bytes(data[34:42],byteorder='big')
+    port_id_bpdu = int.from_bytes(data[42:44],byteorder='big')
     
 
     if root_bridge_id_bpdu < root_bridge_id:
@@ -168,8 +174,8 @@ def receive_bpdu(interface, data,interfaces):
         
         for port in interfaces:
             if port != interface and port_type[get_interface_name(port)] == 'trunk':
-                bpdu = create_bpdu(root_bridge_id, root_path_cost, own_bridge_id, port)
-                send_to_link(port,len(bpdu),bpdu)
+                create_bpdu(root_bridge_id, root_path_cost, own_bridge_id, port)
+                
                 
     elif root_bridge_id_bpdu == root_bridge_id:
         if interface == root_port and root_path_cost_bpdu + 10 < root_path_cost:
