@@ -15,7 +15,6 @@ root_path_cost=0
 root_port=0
 priority=0
 
-BPDU_MULTICAST_MAC = b'\x01\x80\xc2\x00\x00\x00'
 
 def parse_ethernet_header(data):
     # Unpack the header fields from the byte array
@@ -41,10 +40,10 @@ def create_vlan_tag(vlan_id):
     return struct.pack('!H', 0x8200) + struct.pack('!H', vlan_id & 0x0FFF)
 
 def create_bpdu(root_bridge_id, sender_path_cost, sender_bridge_id,port):
-    dest_mac = BPDU_MULTICAST_MAC
+    dest_mac = b'\x01\x80\xc2\x00\x00\x00'
     src_mac = get_switch_mac()
-    # create bdpu frame
-    # dest_mac + src_mac + LLC_LENGTH + LLC_HEADER + BDPU_HEADER + BDPU_CONFIG
+    # create bpdu frame
+    # dest_mac + src_mac + LLC_LENGTH + LLC_HEADER + BPDU_HEADER + BPDU_CONFIG
     bpdu = (
         dest_mac + src_mac + struct.pack('!H3b', 42, 0x42, 0x42, 0x03) + 
         b'\x00\x00\x00\x00' +
@@ -139,16 +138,22 @@ def load_vlan_config(switch_id):
 def initialize_stp(interfaces):
     global port_states,root_path_cost,own_bridge_id,root_bridge_id,priority
     
+    # I put the trunk ports on block-ing
     for i in interfaces:
         if port_type[get_interface_name(i)] =='trunk':
             port_states[i] = 'BLOCKING'
         else:
             port_states[i] = 'DESIGNATED_PORT'
 
-    own_bridge_id=priority
-    root_bridge_id=own_bridge_id
-    root_path_cost=0
+    # Initialize bridge identifiers and path cost
+    # Set own_bridge_id to priority value from the configuration
+    own_bridge_id = priority
+    # Assume initially that this switch is the root bridge
+    root_bridge_id = own_bridge_id
+    # Set root path cost to 0 since this is the assumed root bridge
+    root_path_cost = 0
 
+    # if the port becomes the root bridge, I set the ports as designated
     if own_bridge_id == root_bridge_id:
         for port in port_states:
             port_states[port] = 'DESIGNATED_PORT'
@@ -170,6 +175,7 @@ def receive_bpdu(interface, data,interfaces):
 
         if own_bridge_id == root_bridge_id:
             for port in port_states:
+                # set all interfaces not to hosts to blocking except the root port 
                 if port_type[get_interface_name(port)] == 'trunk' and port != root_port:
                     port_states[port] = 'BLOCKING'
 
@@ -179,6 +185,9 @@ def receive_bpdu(interface, data,interfaces):
         # Update the root bridge ID
         root_bridge_id=root_bridge_id_bpdu
         
+        # Update and forward this BPDU to all other trunk ports with 
+        # sender_bridge_ID = own_bridge_ID
+        # sender_path_cost = root_path_cost
         for port in interfaces:
             if port != interface and port_type[get_interface_name(port)] == 'trunk':
                 create_bpdu(root_bridge_id, root_path_cost, own_bridge_id, port)
@@ -204,6 +213,7 @@ def main():
     # are 0, 1, 2, ..., init_ret value + 1
     switch_id = sys.argv[1]
     global mac_table
+    # load the switch configuration
     load_vlan_config(switch_id)
 
     num_interfaces = wrapper.init(sys.argv[2:])
@@ -227,10 +237,12 @@ def main():
         dest_mac, src_mac, ethertype, vlan_id = parse_ethernet_header(data)
 
         # Print the MAC src and MAC dst in human readable format
+        # transform dest_mac and src_mac into human_readable format and 
+        # then use them in this format when processing the entire format
         dest_mac = ':'.join(f'{b:02x}' for b in dest_mac)
         src_mac = ':'.join(f'{b:02x}' for b in src_mac)
 
-        # check if it is bdpu frame
+        # check if it is bpdu frame
         if dest_mac == "01:80:c2:00:00:00":
             receive_bpdu(interface,data,interfaces)
         else:
