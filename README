@@ -1,0 +1,41 @@
+1 2 3
+
+Gheorghe Marius Razvan
+grupa:334CA
+
+TEMA1 RL
+
+Pentru a rezolva implementarea switch ului am pornit cu implementarea vlan -ului
+Funcția load_vlan_config(switch_id) încarcă configurația fiecărui switch 
+dintr-un fișier specific (switchX.cfg). Aceasta atribuie fiecărui port  un 
+ID de VLAN stocat in dictionarul 'vlan_config', 
+fie eticheta "trunk" pentru porturile trunk stocate in dictionarul 
+port_type[interface], unde interface este cheia.
+Dictionarul mac_table mapează fiecare adresă MAC la 
+perechea (interface, vlan_id), ceea ce permite switch-ului să știe pe ce port
+și în ce VLAN se află fiecare dispozitiv din rețea.
+Daca dest_mac este o adresa de broadcast voi trimite pe toate interfetele,
+apoi apelez functia forward_frame(),care va decide daca cadrul vine
+dupa un port access si trebuie trimis pe unul trunk trebuie adaugat
+tag-ul vlan folosind functia create_tagged_frame() altfel verific
+daca trebuie sa ajunga tot pe un port access verific sa faca parte din acelasi
+VLAN.In caz ca frame ul vine dupa un port trunk si ajunge pe un port access
+apelez functia create_untagged_frame pentru a scoate acel tag de vlan din cadru,
+altfel trimit cadrul nemodificat.
+Pentru implementatarea protocolului STP am implementat pseudocodul prezentat
+in cerintele temei.In functia initialize_stp() setez pe block toate porturile
+"trunk" iar cele "access" pe DESIGNATED stocandu le in dictionarul port_states,
+unde cheia este numele interfetei iar valoarea este starea,
+setez 'own_bridge_id = priority'.
+In functia main verific daca am primit un cadru bpdu,identificandu -l dupa
+adresa MAC,apoi prelucrandu l cu functia receive_bpdu.
+Funcția receive_bpdu procesează un BPDU primit:
+    - extrage din data toate campurile necesare cu int.from_bytes()
+    - extrage și compară ID-ul root bridge-ului și costul drumului pentru
+a verifica dacă switch-ul curent trebuie să-și actualizeze root bridge-ul.
+    - dacă BPDU-ul primit are un ID mai mic pentru root bridge, 
+switch-ul își actualizează root bridge-ul și retransmite BPDU-ul actualizat 
+pe toate porturile trunk.
+Functia create_bpdu() creaza cadrul bpdu actualizat ,folosind struct.pack,
+pachetul se transmite sub forma de bytes , pastrand asemanator structura 
+bpdu_config,exceptand campurile care nu erau utilizate in algoritmul STP.

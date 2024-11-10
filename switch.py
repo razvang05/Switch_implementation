@@ -149,7 +149,7 @@ def initialize_stp(interfaces):
     # Set own_bridge_id to priority value from the configuration
     own_bridge_id = priority
     # Assume initially that this switch is the root bridge
-    root_bridge_id = own_bridge_id
+    root_bridge_id = priority
     # Set root path cost to 0 since this is the assumed root bridge
     root_path_cost = 0
 
@@ -179,8 +179,6 @@ def receive_bpdu(interface, data,interfaces):
                 if port_type[get_interface_name(port)] == 'trunk' and port != root_port:
                     port_states[port] = 'BLOCKING'
 
-        if port_states[root_port] == 'BLOCKING':
-            port_states[root_port] = 'LISTENING'
 
         # Update the root bridge ID
         root_bridge_id=root_bridge_id_bpdu
@@ -240,12 +238,12 @@ def main():
         # transform dest_mac and src_mac into human_readable format and 
         # then use them in this format when processing the entire format
         dest_mac = ':'.join(f'{b:02x}' for b in dest_mac)
-        src_mac = ':'.join(f'{b:02x}' for b in src_mac)
 
         # check if it is bpdu frame
         if dest_mac == "01:80:c2:00:00:00":
             receive_bpdu(interface,data,interfaces)
         else:
+            src_mac = ':'.join(f'{b:02x}' for b in src_mac)
             mac_table[src_mac] = (interface,vlan_id)
             # broadcast
             if(is_broadcast(dest_mac)):
